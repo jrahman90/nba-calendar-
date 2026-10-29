@@ -18,25 +18,32 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Generate feeds from official NBA schedule
+      - name: Generate feeds from ESPN schedule
         shell: python
         run: |
           import json
           from pathlib import Path
           from urllib.request import Request, urlopen
           from datetime import datetime, timedelta, timezone
-          errors = []
-          for suffix in ['', '_1']:
-              try:
-                  url = f'https://cdn.nba.com/static/json/staticData/scheduleLeagueV2{suffix}.json'
-                  with urlopen(Request(url, headers={'User-Agent':'Mozilla/5.0', 'Referer':'https://www.nba.com/'}), timeout=60) as r:
-                      data = json.load(r)['leagueSchedule']
-                  assert data['gameDates']
-                  break
-              except Exception as e:
-                  errors.append(str(e))
-          else:
-              raise RuntimeError('; '.join(errors))
+          data = {'gameDates': [], 'seasonYear': ''}
+          for team in ['ny', 'phi']:
+              for kind in [2, 3]:
+                  url = f'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/teams/{team}/schedule?seasontype={kind}'
+                  with urlopen(Request(url, headers={'User-Agent':'Mozilla/5.0'}), timeout=60) as r:
+                      payload = json.load(r)
+                  if kind == 2:
+                      assert payload.get('events'), 'Empty regular season schedule'
+                  data['seasonYear'] = payload.get('season',{}).get('displayName','')
+                  for e in payload.get('events',[]):
+                      c = e['competitions'][0]
+                      def team_info(side):
+                          t = next(x['team'] for x in c['competitors'] if x['homeAway'] == side)
+                          return {'teamTricode': {'NY':'NYK'}.get(t['abbreviation'],t['abbreviation']), 'teamName': t['displayName']}
+                      v = c.get('venue',{})
+                      dt = datetime.fromisoformat(e['date'].replace('Z','+00:00'))
+                      status = c.get('status',{}).get('type',{}).get('description','')
+                      g = {'gameId': e['id'], 'homeTeam':team_info('home'), 'awayTeam':team_info('away'), 'gameDateTimeUTC':e['date'] if e.get('timeValid',c.get('timeValid',True)) else None, 'gameStatusText':status, 'arenaName':v.get('fullName'), 'arenaCity':v.get('address',{}).get('city'), 'arenaState':v.get('address',{}).get('state')}
+                      data['gameDates'].append({'gameDate': dt.strftime('%m/%d/%Y'), 'games':[g]})
           def esc(s):
               return str(s or '').replace(chr(92), chr(92)*2).replace(chr(10), chr(92)+'n').replace(';', chr(92)+';').replace(',', chr(92)+',')
           def fold(s):
@@ -64,7 +71,7 @@ jobs:
                       raw = g.get('gameDateTimeUTC')
                       tbd = not raw or 'TBD' in status.upper()
                       name = lambda t: (t.get('teamCity','')+' '+t.get('teamName',t['teamTricode'])).strip()
-                      lines += ['BEGIN:VEVENT','UID:nba-'+gid+'@nba-calendar','DTSTAMP:'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'),'SUMMARY:'+esc(name(a)+' at '+name(h)+(' (time TBD)' if tbd else ''))]
+                      lines += ['BEGIN:VEVENT','UID:espn-nba-'+gid+'@nba-calendar','DTSTAMP:'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'),'SUMMARY:'+esc(name(a)+' at '+name(h)+(' (time TBD)' if tbd else ''))]
                       if tbd:
                           d = datetime.strptime(day['gameDate'].split(' ')[0], '%m/%d/%Y')
                           lines += ['DTSTART;VALUE=DATE:'+d.strftime('%Y%m%d'),'DTEND;VALUE=DATE:'+(d+timedelta(days=1)).strftime('%Y%m%d')]
@@ -73,7 +80,7 @@ jobs:
                           lines += ['DTSTART:'+d.strftime('%Y%m%dT%H%M%SZ'),'DTEND:'+(d+timedelta(hours=2,minutes=30)).strftime('%Y%m%dT%H%M%SZ')]
                       loc = ', '.join(filter(None,[g.get('arenaName'),g.get('arenaCity'),g.get('arenaState')]))
                       state = 'CANCELLED' if 'cancel' in status.lower() else 'TENTATIVE' if tbd or 'postpon' in status.lower() else 'CONFIRMED'
-                      lines += ['LOCATION:'+esc(loc),'STATUS:'+state,'DESCRIPTION:Official NBA schedule. Duration estimated at 2.5 hours.','URL:https://www.nba.com/game/'+gid,'TRANSP:TRANSPARENT','END:VEVENT']
+                      lines += ['LOCATION:'+esc(loc),'STATUS:'+state,'DESCRIPTION:NBA schedule via ESPN. Duration estimated at 2.5 hours.','URL:https://www.espn.com/nba/game/_/gameId/'+gid,'TRANSP:TRANSPARENT','END:VEVENT']
               assert seen, 'No games found; preserving existing feed'
               feeds[filename] = '\r\n'.join(map(fold, lines+['END:VCALENDAR']))+'\r\n'
               print(filename, len(seen), 'games; season', data.get('seasonYear'))
